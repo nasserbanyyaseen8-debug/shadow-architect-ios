@@ -48,8 +48,8 @@ jobs:
 
       - name: Package unsigned IPA
         run: |
-          APP="build/DerivedData/Build/Products/Release-iphoneos/ShadowArchitect.app"
-          test -d "$APP"
+          APP=$(find build -type d -name ShadowArchitect.app | head -n 1)
+          test -n "$APP" && test -d "$APP"
           mkdir -p build/ipa/Payload
           cp -R "$APP" build/ipa/Payload/
           (cd build/ipa && zip -q -r ShadowArchitect-unsigned.ipa Payload)
