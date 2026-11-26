@@ -1,0 +1,211 @@
+name: Build Shadow Architect IPA
+
+# =====================================================================
+#  SECRETS اللي لازم تضيفها في:
+#  GitHub repo > Settings > Secrets and variables > Actions > New repository secret
+#
+#  1) IOS_CERT_P12              = شهادة التوقيع بصيغة base64
+#       openssl base64 -in cert.p12 -A       (macOS: base64 -i cert.p12 | tr -d '\n')
+#  2) IOS_CERT_PASSWORD         = كلمة مرور الـ .p12
+#  3) IOS_PROVISIONING_PROFILE  = ملف .mobileprovision بصيغة base64
+#  4) IOS_TEAM_ID               = معرّف الفريق من Apple Developer (مثال: AB12CD34)
+#  5) IOS_PROFILE_NAME          = اسم الـ Provisioning Profile داخل Xcode
+#  6) IOS_CODE_SIGN_IDENTITY    = اسم الهوية، مثال:
+#       Apple Development: Nasser (AB12CD34)
+#       أو Apple Distribution: Nasser (AB12CD34)
+#
+#  VARIABLES اختيارية (Variables مش Secrets):
+#      BUNDLE_ID          = com.nasser.shadowarchitect  (لازم يطابق الـ profile)
+#      IOS_EXPORT_METHOD  = development | ad-hoc | app-store   (الافتراضي: development)
+#
+#  ملاحظة: بدون شهادة و profile صالحين ما راح يطلع IPA قابل للتثبيت.
+#  التوقيع المجاني (Apple ID شخصي) يصلح لـ development وينتهي بعد 7 أيام.
+# =====================================================================
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+
+env:
+  BUNDLE_ID: ${{ vars.BUNDLE_ID || 'com.nasser.shadowarchitect' }}
+  IOS_EXPORT_METHOD: ${{ vars.IOS_EXPORT_METHOD || 'development' }}
+  SCHEME: ShadowArchitect
+
+jobs:
+  build-ios:
+    name: Build & export IPA on macOS
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------
+      # تجهيز Xcode و CMake على الـ runner السحابي
+      # ---------------------------------------------------------------
+      - name: Select latest Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+          cmake --version
+
+      # ---------------------------------------------------------------
+      # استيراد شهادة التوقيع في keychain مؤقت خاص بالـ job
+      # ---------------------------------------------------------------
+      - name: Import signing certificate
+        env:
+          CERT_BASE64: ${{ secrets.IOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD || 'temporary-keychain-password' }}
+        run: |
+          if [ -z "$CERT_BASE64" ]; then
+            echo "::error::IOS_CERT_P12 secret is missing"
+            exit 1
+          fi
+          echo "$CERT_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/sa-signing.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$RUNNER_TEMP/certificate.p12" \
+            -k "$KEYCHAIN_PATH" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # أخلي الـ keychain الجديد أول واحد في قائمة البحث
+          EXISTING=$(security list-keychains -d user | tr -d '"' | tr '\n' ' ')
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $EXISTING
+
+          echo "::group::Available signing identities"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+          echo "::endgroup::"
+
+      # ---------------------------------------------------------------
+      # تثبيت الـ Provisioning Profile
+      # ---------------------------------------------------------------
+      - name: Install provisioning profile
+        env:
+          PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE }}
+        run: |
+          if [ -z "$PROFILE_BASE64" ]; then
+            echo "::error::IOS_PROVISIONING_PROFILE secret is missing"
+            exit 1
+          fi
+          PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILE_DIR"
+          echo "$PROFILE_BASE64" | base64 --decode > "$PROFILE_DIR/shadow-architect.mobileprovision"
+          ls -lh "$PROFILE_DIR"
+
+      # ---------------------------------------------------------------
+      # توليد مشروع Xcode من CMake (C++ core + ObjC++ UIKit layer)
+      # ---------------------------------------------------------------
+      - name: Configure CMake for iOS
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          PROFILE_NAME: ${{ secrets.IOS_PROFILE_NAME }}
+          SIGN_IDENTITY: ${{ secrets.IOS_CODE_SIGN_IDENTITY }}
+        run: |
+          if [ -z "$TEAM_ID" ] || [ -z "$PROFILE_NAME" ] || [ -z "$SIGN_IDENTITY" ]; then
+            echo "::error::IOS_TEAM_ID / IOS_PROFILE_NAME / IOS_CODE_SIGN_IDENTITY are required"
+            exit 1
+          fi
+
+          cmake -S . -B build -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DSA_BUNDLE_ID="$BUNDLE_ID" \
+            -DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM="$TEAM_ID" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_STYLE=Manual \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
+            -DCMAKE_XCODE_ATTRIBUTE_PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME"
+
+      # ---------------------------------------------------------------
+      # أرشفة التطبيق
+      # ---------------------------------------------------------------
+      - name: Archive app
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          PROFILE_NAME: ${{ secrets.IOS_PROFILE_NAME }}
+          SIGN_IDENTITY: ${{ secrets.IOS_CODE_SIGN_IDENTITY }}
+        run: |
+          xcodebuild \
+            -project build/ShadowArchitect.xcodeproj \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination generic/platform=iOS \
+            -archivePath "$RUNNER_TEMP/ShadowArchitect.xcarchive" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="$SIGN_IDENTITY" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            -allowProvisioningUpdates \
+            clean archive
+
+      # ---------------------------------------------------------------
+      # تصدير IPA
+      # ---------------------------------------------------------------
+      - name: Export IPA
+        env:
+          TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          PROFILE_NAME: ${{ secrets.IOS_PROFILE_NAME }}
+          SIGN_IDENTITY: ${{ secrets.IOS_CODE_SIGN_IDENTITY }}
+        run: |
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>${IOS_EXPORT_METHOD}</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string>${SIGN_IDENTITY}</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key>
+              <string>${PROFILE_NAME}</string>
+            </dict>
+            <key>stripSwiftSymbols</key>
+            <false/>
+            <key>compileBitcode</key>
+            <false/>
+          </dict>
+          </plist>
+          EOF
+
+          mkdir -p "$RUNNER_TEMP/export"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/ShadowArchitect.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates
+
+          ls -lh "$RUNNER_TEMP/export"
+
+      # ---------------------------------------------------------------
+      # رفع الملف الناتج
+      # ---------------------------------------------------------------
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShadowArchitect-IPA
+          path: ${{ runner.temp }}/export/*.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Report IPA size
+        run: |
+          IPA=$(find "$RUNNER_TEMP/export" -name '*.ipa' | head -n 1)
+          echo "IPA: $IPA"
+          du -h "$IPA"
