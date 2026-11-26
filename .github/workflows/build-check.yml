@@ -1,0 +1,40 @@
+name: Compile Check (no signing)
+
+# يفحص كود C++/ObjC++ على ماك بدون توقيع. ما يطلع IPA، بس يكشف أخطاء البناء.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**.cpp'
+      - '**.hpp'
+      - '**.h'
+      - '**.mm'
+      - 'CMakeLists.txt'
+      - '.github/workflows/build-check.yml'
+
+jobs:
+  compile:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+      - name: Configure (iOS Simulator, unsigned)
+        run: |
+          cmake -S . -B build -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphonesimulator \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+      - name: Build
+        run: |
+          xcodebuild -project build/ShadowArchitect.xcodeproj \
+            -scheme ShadowArchitect \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/DerivedData \
+            build
