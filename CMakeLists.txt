@@ -46,7 +46,8 @@ set_target_properties(ShadowArchitect PROPERTIES
 find_library(UIKIT UIKit REQUIRED)
 find_library(AVFOUNDATION AVFoundation REQUIRED)
 find_library(QUARTZCORE QuartzCore REQUIRED)
-target_link_libraries(ShadowArchitect PRIVATE ${UIKIT} ${AVFOUNDATION} ${QUARTZCORE})
+find_library(COREGRAPHICS CoreGraphics REQUIRED)
+target_link_libraries(ShadowArchitect PRIVATE ${UIKIT} ${AVFOUNDATION} ${QUARTZCORE} ${COREGRAPHICS})
 
 if(MSVC)
     target_compile_options(ShadowArchitect PRIVATE /utf-8)
