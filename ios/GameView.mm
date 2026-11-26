@@ -1,5 +1,6 @@
 #import "GameView.h"
 #import <AVFoundation/AVFoundation.h>
+#import <QuartzCore/QuartzCore.h>
 #include "GameCore.hpp"
 #include "Audio.hpp"
 #include <algorithm>
@@ -10,7 +11,7 @@ namespace {
 struct TapButton {
     CGRect r;
     int tag;
-    NSString* label;
+    __unsafe_unretained NSString* label;
     bool primary;
     bool disabled;
 };
